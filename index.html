@@ -275,6 +275,7 @@ details p,details li{color:#b9c0cb;font-size:14px}kbd{background:#111;border:1px
     </select>
     <select id="ttsVoice" aria-label="Głos syntezatora mowy"></select>
     <label><input type="checkbox" id="ttsSys"> także systemowe</label>
+    <button class="btn sm" id="ttsTest" title="Próbka z liczbami">Test</button>
     <button class="btn sm" id="ttsStop" title="Przerwij czytanie" aria-label="Przerwij czytanie">■</button>
   </div>
   <div id="ttsNote" hidden></div>
@@ -369,8 +370,38 @@ function ttsRefresh(){ if(!('speechSynthesis' in window))return; const all=speec
 function ttsPick(kind){ const list=TTS.voices.length?TTS.voices:TTS.all; if(!list.length)return null;
   if(TTS.sel){ const v=list.find(x=>x.name===TTS.sel); if(v)return v; }
   const pool=list.filter(v=>(kind==='male'?TTS_MALE:TTS_FEM).test(v.name)); return (pool.length?pool:list)[0]||null; }
-function ttsClean(t){ return String(t).replace(/<[^>]*>/g,' ').replace(/&nbsp;/g,' ').replace(/&amp;/g,' i ').replace(/&[a-z#0-9]+;/gi,' ')
-  .replace(/\bkm\/h\b/gi,'kilometrów na godzinę').replace(/\bkm\b/gi,'kilometr').replace(/\bMHz\b/g,'megaherców')
+/* liczby po polsku — model neuronowy nie czyta cyfr, więc zamieniamy je na słowa */
+const PL_D=['zero','jeden','dwa','trzy','cztery','pięć','sześć','siedem','osiem','dziewięć'];
+const PL_T=['','dziesięć','dwadzieścia','trzydzieści','czterdzieści','pięćdziesiąt','sześćdziesiąt','siedemdziesiąt','osiemdziesiąt','dziewięćdziesiąt'];
+const PL_N=['dziesięć','jedenaście','dwanaście','trzynaście','czternaście','piętnaście','szesnaście','siedemnaście','osiemnaście','dziewiętnaście'];
+const PL_H=['','sto','dwieście','trzysta','czterysta','pięćset','sześćset','siedemset','osiemset','dziewięćset'];
+function plTens(n){ if(n<10)return PL_D[n]; if(n<20)return PL_N[n-10]; const t=(n/10)|0,r=n%10; return PL_T[t]+(r?' '+PL_D[r]:''); }
+function plHund(n){ const h=(n/100)|0,r=n%100; return [h?PL_H[h]:'',r?plTens(r):''].filter(Boolean).join(' '); }
+function plPlural(n,one,few,many){ const a=Math.abs(n)%100,b=a%10;
+  if(a===1)return one; if(b>=2&&b<=4&&(a<12||a>14))return few; return many; }
+function plInt(n){ n=Math.abs(n|0); if(!n)return 'zero';
+  const th=(n/1000)|0,r=n%1000; let s='';
+  if(th) s=th===1?'tysiąc':plHund(th)+' '+plPlural(th,'tysiąc','tysiące','tysięcy');
+  if(r) s+=(s?' ':'')+plHund(r); return s; }
+function plDigits(s){ return String(s).replace(/\d/g,d=>PL_D[+d]+' ').replace(/[-–—/.]/g,' ').replace(/\s+/g,' ').trim(); }
+function plNums(t){ return t
+  .replace(/(\d+)[,.](\d+)\s*km\/h/gi,(m,a,b)=>plInt(a)+' przecinek '+plDigits(b)+' kilometrów na godzinę')
+  .replace(/(\d+)\s*km\/h/gi,(m,a)=>plInt(a)+' kilometrów na godzinę')
+  .replace(/\bkm\s+(\d+)[,.](\d+)/gi,(m,a,b)=>'kilometr '+plInt(a)+' przecinek '+plDigits(b))
+  .replace(/\bkm\s+(\d+)/gi,(m,a)=>'kilometr '+plInt(a))
+  .replace(/\b(\d+),(\d+)\b/g,(m,a,b)=>plInt(a)+' przecinek '+plDigits(b))
+  .replace(/(\d+)\s*%/g,(m,a)=>plInt(a)+' procent')
+  .replace(/(\d+)\s*MHz/g,(m,a)=>plInt(a)+' megaherców')
+  .replace(/(\d+)\s*s\b/g,(m,a)=>plInt(a)+' '+plPlural(+a,'sekunda','sekundy','sekund'))
+  .replace(/(\d+)\s*t\b/g,(m,a)=>plInt(a)+' '+plPlural(+a,'tona','tony','ton'))
+  .replace(/(\d+)\s*m\b/g,(m,a)=>plInt(a)+' metrów')
+  .replace(/\bR(\d+)\b/g,(m,a)=>'er '+plDigits(a))
+  .replace(/\bnumer\s+(\d+)/gi,(m,a)=>'numer '+plDigits(a))
+  .replace(/\b\d+(?:-\d+)+\b/g,m=>plDigits(m))
+  .replace(/\b\d+\.\d+\.\d+\b/g,m=>plDigits(m))
+  .replace(/\b\d{4,}\b/g,m=>plDigits(m))
+  .replace(/\b\d+\b/g,m=>plInt(m)); }
+function ttsClean(t){ return plNums(String(t).replace(/<[^>]*>/g,' ').replace(/&nbsp;/g,' ').replace(/&amp;/g,' i ').replace(/&[a-z#0-9]+;/gi,' '))
   .replace(/\bETCS\b/g,'E T C S').replace(/\bGSM-R\b/g,'G S M R').replace(/\bRBC\b/g,'R B C').replace(/\bSHP\b/g,'S H P')
   .replace(/\bDMI\b/g,'D M I').replace(/\bVHF\b/g,'V H F').replace(/\bREC\b/g,'R E C').replace(/\bPTT\b/g,'P T T')
   .replace(/\bpoc\./gi,'pociągu').replace(/\s+/g,' ').trim(); }
@@ -983,6 +1014,8 @@ $('#bSnd').onclick=e=>{ mute=!mute; e.target.textContent='Dźwięk: '+(mute?'wy�
 $('#bSpk').onclick=()=>ttsEnable(!TTS.on);
 $('#ttsBtn').onclick=()=>ttsEnable(!TTS.on);
 $('#ttsStop').onclick=()=>{ click(); ttsStop(); };
+$('#ttsTest').onclick=()=>{ if(!TTS.on) ttsEnable(true); ttsStop();
+  ttsSay('Pociąg 54102, kilometr 6,5, prędkość 60 km/h, kanał R5.',{prof:'dr'}); };
 $('#ttsEngine').onchange=e=>{ TTS.engine=e.target.value; ttsSave(); ttsStop(); ttsUI();
   if(TTS.engine==='neural'){ if(!TTS.on) ttsEnable(true); else neuReady().catch(()=>{}); }
   else if(TTS.on) ttsSay('Silnik systemowy.',{prof:'system'}); };

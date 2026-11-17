@@ -158,6 +158,13 @@ body[data-tab=dmi] #pDmi,body[data-tab=radio] #pRadio,body[data-tab=guide] #pGui
 #log div{padding:6px 9px;border-radius:8px;background:#262c35}
 #log .me{background:#3b3320;margin-left:22px}#log .sys{background:none;border:1px dashed var(--line);color:var(--mut);font-size:12.5px}
 #log small{display:block;color:var(--mut);font-size:11px}
+.ttsbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 10px}
+.ttsbar .btn{white-space:nowrap;flex:0 0 auto}
+.ttsbar select{flex:1 1 150px;min-width:0;background:#2a313c;border:1px solid var(--line);border-radius:6px;padding:8px;color:inherit;font:inherit;font-size:13px}
+.ttsbar label{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--mut);white-space:nowrap}
+.ttsbar label input{accent-color:var(--acc)}
+#ttsBtn.speaking{border-color:var(--ok);color:var(--ok)}
+#ttsBtn.speaking::after{content:"";display:inline-block;width:7px;height:7px;margin-left:7px;border-radius:50%;background:var(--ok);animation:bl .8s infinite}
 
 /* ---------- instruktor ---------- */
 .gcols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
@@ -257,6 +264,12 @@ details p,details li{color:#b9c0cb;font-size:14px}kbd{background:#111;border:1px
   <div id="phrHint"></div>
   <div id="phr"></div>
   <h2 style="margin-top:14px">Dziennik łączności</h2>
+  <div class="ttsbar">
+    <button class="btn sm" id="ttsBtn" aria-pressed="false">🔇 Czytaj dziennik</button>
+    <select id="ttsVoice" aria-label="Głos syntezatora mowy"></select>
+    <label><input type="checkbox" id="ttsSys"> także systemowe</label>
+    <button class="btn sm" id="ttsStop" title="Przerwij czytanie" aria-label="Przerwij czytanie">■</button>
+  </div>
   <div id="log"></div>
 </section>
 
@@ -303,7 +316,7 @@ const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const TRACK={len:10400,ssp:[[0,100],[1500,160],[4000,120],[5500,160],[8000,80],[9000,40]],sig:[3000,6500,9900],plat:[9650,9850],os:[9000,9900],chan:5};
 const FREQ={1:'150.100',2:'150.150',3:'150.225',4:'150.325',5:'150.375',6:'150.450',7:'150.575',8:'150.500'};
 const EOAS=[0,3000,6500,9900];
-let mute=false, speech=false;
+let mute=false;
 const NV={sbTsm:false,relStand:false,ca:true};
 const NVV={sr:40,os:20,sh:25,rel:20,un:100,ovr:30,dOvr:200,tOvr:60};
 function margins(P){ const f=(lo,hi)=>P<=110?lo:P>=210?hi:lo+(hi-lo)*(P-110)/100; return {w:P<=110?4:P>=140?5:4+(P-110)/30,sbi:f(5.5,10),ebi:f(7.5,15)}; }
@@ -324,7 +337,73 @@ let AC=null;
 function tone(f,d,vol=.07,type='sine',when=0){ if(mute)return; try{ AC=AC||new (window.AudioContext||window.webkitAudioContext)(); if(AC.state==='suspended')AC.resume();
   const o=AC.createOscillator(),g=AC.createGain(); o.type=type;o.frequency.value=f;g.gain.value=vol; o.connect(g);g.connect(AC.destination); o.start(AC.currentTime+when);o.stop(AC.currentTime+when+d);}catch(e){} }
 const click=()=>tone(1400,.03,.03,'square');
-function speak(t){ if(!speech||!('speechSynthesis' in window))return; try{const u=new SpeechSynthesisUtterance(t);u.lang='pl-PL';u.rate=1.05;speechSynthesis.speak(u);}catch(e){} }
+/* ---------- synteza mowy (TTS) dziennika łączności ---------- */
+const TTS={on:false,sys:false,rate:1,sel:'',voices:[],all:[],q:[],busy:false,cur:null,wd:null,retry:0,cool:0};
+const TTS_KEY='etcs.tts.v1';
+const TTS_MALE=/marek|krzysztof|jacek|adam|michał|michal|piotr|paweł|pawel|andrzej|zbigniew|\bjan\b|male|męski/i;
+const TTS_FEM=/zofia|zosia|paulina|agnieszka|ewa|julia|kobieta|female/i;
+const TTS_GOOD=/zofia|paulina|marek|agnieszka|krzysztof|ewa|jacek|julia|google/i;
+const TTS_PROF={dr:{k:'male',rate:.97,pitch:.85,vol:1},dysp:{k:'male',rate:1,pitch:.9,vol:1},
+  poc:{k:'male',rate:1.02,pitch:1.08,vol:1},me:{k:'female',rate:1,pitch:.95,vol:.55},system:{k:'female',rate:.98,pitch:1,vol:.9}};
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ttsName=v=>{ const n=String(v.name).replace(/^Microsoft\s+/i,'').replace(/\s*-\s*Polish\s*\(Poland\)\s*$/i,'').replace(/\s*-\s*polski\s*$/i,'').trim(); return n||v.name; };
+/* im wyżej, tym przyjemniejszy głos: naturalne/neuronowe > Google > Microsoft > reszta */
+function ttsScore(v){ let s=0; if(/natural|neural/i.test(v.name))s+=80; if(/online/i.test(v.name))s+=20;
+  if(/google/i.test(v.name))s+=55; if(/microsoft/i.test(v.name))s+=30; if(TTS_GOOD.test(v.name))s+=25;
+  if(v.localService===false)s+=5; return s; }
+function ttsLoad(){ try{ const o=JSON.parse(localStorage.getItem(TTS_KEY)||'{}');
+  if(typeof o.on==='boolean')TTS.on=o.on; if(typeof o.sys==='boolean')TTS.sys=o.sys; if(typeof o.sel==='string')TTS.sel=o.sel; }catch(e){} }
+function ttsSave(){ try{ localStorage.setItem(TTS_KEY,JSON.stringify({on:TTS.on,sys:TTS.sys,sel:TTS.sel})); }catch(e){} }
+function ttsRefresh(){ if(!('speechSynthesis' in window))return; const all=speechSynthesis.getVoices()||[]; TTS.all=all;
+  const pl=all.filter(v=>/^pl/i.test(v.lang||''));
+  TTS.voices=(pl.length?pl:all).slice().sort((a,b)=>ttsScore(b)-ttsScore(a)||a.name.localeCompare(b.name)); ttsUI(); }
+function ttsPick(kind){ const list=TTS.voices.length?TTS.voices:TTS.all; if(!list.length)return null;
+  if(TTS.sel){ const v=list.find(x=>x.name===TTS.sel); if(v)return v; }
+  const pool=list.filter(v=>(kind==='male'?TTS_MALE:TTS_FEM).test(v.name)); return (pool.length?pool:list)[0]||null; }
+function ttsClean(t){ return String(t).replace(/<[^>]*>/g,' ').replace(/&nbsp;/g,' ').replace(/&amp;/g,' i ').replace(/&[a-z#0-9]+;/gi,' ')
+  .replace(/\bkm\/h\b/gi,'kilometrów na godzinę').replace(/\bkm\b/gi,'kilometr').replace(/\bMHz\b/g,'megaherców')
+  .replace(/\bETCS\b/g,'E T C S').replace(/\bGSM-R\b/g,'G S M R').replace(/\bRBC\b/g,'R B C').replace(/\bSHP\b/g,'S H P')
+  .replace(/\bDMI\b/g,'D M I').replace(/\bVHF\b/g,'V H F').replace(/\bREC\b/g,'R E C').replace(/\bPTT\b/g,'P T T')
+  .replace(/\bpoc\./gi,'pociągu').replace(/\s+/g,' ').trim(); }
+function ttsChunks(t){ const s=ttsClean(t); if(!s)return []; const parts=s.match(/[^.!?…]+[.!?…]*/g)||[s]; const out=[]; let b='';
+  for(const p of parts){ const x=p.trim(); if(!x)continue;
+    if((b?b.length+1:0)+x.length>170){ if(b)out.push(b); b=x; } else b=b?b+' '+x:x; }
+  if(b)out.push(b); return out; }
+function ttsSay(t,o){ if(!TTS.on)return; const ch=ttsChunks(t); if(!ch.length)return;
+  const prof=(o&&o.prof)||'system', vol=o&&o.vol;
+  for(const c of ch) TTS.q.push({text:c,prof,vol});
+  if(TTS.q.length>10)TTS.q.splice(0,TTS.q.length-10); ttsPump(); }
+function ttsPump(){ if(!TTS.on||TTS.busy||!TTS.q.length||!('speechSynthesis' in window))return;
+  const it=TTS.q.shift(), p=TTS_PROF[it.prof]||TTS_PROF.system;
+  if(!TTS.all.length&&TTS.retry<12){ TTS.retry++; TTS.q.unshift(it); setTimeout(ttsPump,250); return; }  // poczekaj na listę głosów
+  if(TTS.cool&&performance.now()-TTS.cool<90){ TTS.q.unshift(it); setTimeout(ttsPump,100); return; }        // chwila po cancel()
+  TTS.retry=0; TTS.cool=0;
+  const u=new SpeechSynthesisUtterance(it.text), v=ttsPick(p.k), neural=!!(v&&/natural|neural/i.test(v.name));
+  if(v){ u.voice=v; u.lang=v.lang; } else u.lang='pl-PL';
+  u.rate=Math.max(.5,Math.min(2,p.rate*TTS.rate)); u.pitch=neural?1:p.pitch; u.volume=it.vol!=null?it.vol:p.vol;
+  let done=false; const fin=()=>{ if(done)return; done=true; clearTimeout(TTS.wd); TTS.busy=false; TTS.cur=null; ttsUI(); ttsPump(); };
+  u.onend=fin; u.onerror=fin; TTS.busy=true; TTS.cur=u; ttsUI();
+  try{ speechSynthesis.resume(); speechSynthesis.speak(u); }catch(e){ fin(); return; }
+  TTS.wd=setTimeout(fin,3000+it.text.length*190); }
+function ttsStop(){ TTS.q=[]; TTS.busy=false; TTS.cur=null; TTS.retry=0; TTS.cool=performance.now(); clearTimeout(TTS.wd);
+  try{ if('speechSynthesis' in window) speechSynthesis.cancel(); }catch(e){} ttsUI(); }
+function ttsUI(){ const sup='speechSynthesis' in window;
+  const h=$('#bSpk'); if(h){ h.disabled=!sup; h.textContent='Mowa: '+(!sup?'brak':TTS.on?'wł.':'wył.'); h.classList.toggle('on',TTS.on&&sup); }
+  const b=$('#ttsBtn'); if(b){ b.disabled=!sup; b.textContent=TTS.busy?'🔊 Czyta…':TTS.on?'🔊 Czytaj dziennik':'🔇 Czytaj dziennik';
+    b.classList.toggle('on',TTS.on&&sup); b.classList.toggle('speaking',TTS.busy); b.setAttribute('aria-pressed',TTS.on?'true':'false'); }
+  const c=$('#ttsSys'); if(c)c.checked=!!TTS.sys;
+  const s=$('#ttsVoice'); if(s){ s.disabled=!sup; const auto=TTS.voices[0]||TTS.all[0];
+    s.innerHTML=`<option value="">Automatyczny — ${auto?esc(ttsName(auto)):'domyślny'}</option>`+
+      TTS.voices.map(v=>`<option value="${esc(v.name)}">${esc(ttsName(v))}${/^pl/i.test(v.lang||'')?'':' · '+esc(v.lang||'')}</option>`).join('');
+    s.value=TTS.voices.some(v=>v.name===TTS.sel)?TTS.sel:''; } }
+function ttsEnable(on){ if(!('speechSynthesis' in window)){ ttsUI(); return; } TTS.on=!!on; ttsSave(); if(!TTS.on)ttsStop(); else { ttsRefresh(); ttsSay('Czytanie dziennika łączności włączone.',{prof:'system'}); } ttsUI(); }
+function ttsLog(from,text,cls){ if(!TTS.on)return;
+  if(cls==='sys'){ if(TTS.sys)ttsSay(text,{prof:'system'}); return; }
+  if(cls==='me'){ ttsSay(text,{prof:'me'}); return; }
+  const f=String(from||''); ttsSay(text,{prof:/Dyspozytor/.test(f)?'dysp':/Dyżurny/.test(f)?'dr':'poc'}); }
+function speak(t){ ttsSay(t,{prof:'system'}); }
+if('speechSynthesis' in window){ ttsLoad(); ttsRefresh();
+  try{ speechSynthesis.addEventListener('voiceschanged',ttsRefresh); }catch(e){ speechSynthesis.onvoiceschanged=ttsRefresh; } }
 
 /* ---------- tor ---------- */
 function sspMin(pos,L){ let m=999; const a=pos-L, P=prof(); for(let i=0;i<P.length;i++){ const s=P[i][0], e=i+1<P.length?P[i+1][0]:1e9; if(e>a&&s<=pos) m=Math.min(m,P[i][1]); } return m; }
@@ -606,10 +685,10 @@ const EVN='3-21505909-01';
 const BOOK=[{n:'1200',who:'dr',name:'Dyżurny ruchu'},{n:'1300',who:'dysp',name:'Dyspozytor liniowy'},{n:'1400',who:'zas',name:'Dyspozytor zasilania'},{n:'200',who:'grp',name:'Wszyscy w pobliżu'}];
 const station=()=>S.pos<4500?'Dobra Wola':'Lipowa';
 const NAME={dr:()=>'Dyżurny ruchu '+station(),dysp:()=>'Dyspozytor liniowy',zas:()=>'Dyspozytor zasilania',poc:()=>'Maszynista poc. 44012',grp:()=>'Maszynista poc. 44012 (grupa 200)'};
-function log(from,text,cls){ const d=document.createElement('div'); d.className=cls||''; d.innerHTML=`<small>${clock()} · ${from}</small>${text}`; const L=$('#log'); L.prepend(d); while(L.children.length>40) L.lastChild.remove(); }
+function log(from,text,cls){ const d=document.createElement('div'); d.className=cls||''; d.innerHTML=`<small>${clock()} · ${from}</small>${text}`; const L=$('#log'); L.prepend(d); while(L.children.length>40) L.lastChild.remove(); ttsLog(from,text,cls); }
 function sysLog(t){ log('System',t,'sys'); }
 function alertTab(on){ $('#tabRadio').classList.toggle('alert',on&&document.body.dataset.tab!=='radio'); }
-function voice(who,text){ R.rx=true; ui(); if(R.mode==='VHF') tone(180,.15,.03,'sawtooth'); log(NAME[who](),text,'in'); speak(text); alertTab(true); setTimeout(()=>{R.rx=false;ui();},2200); }
+function voice(who,text){ R.rx=true; ui(); if(R.mode==='VHF') tone(180,.15,.03,'sawtooth'); log(NAME[who](),text,'in'); alertTab(true); setTimeout(()=>{R.rx=false;ui();},2200); }
 const conn=()=>R.on&&!R.boot&&((R.mode==='GSM'&&R.call&&R.call.state==='active')||(R.mode==='VHF'&&R.link&&Date.now()<R.link.exp));
 const linked=()=>conn()&&R.hs;
 const who=()=>R.mode==='GSM'?R.call.who:R.link.who;
@@ -829,7 +908,14 @@ setInterval(()=>{ let cur=false; $$('#steps li').forEach((li,i)=>{ const d=STEPS
 
 /* ================= pasek górny, start ================= */
 $('#bSnd').onclick=e=>{ mute=!mute; e.target.textContent='Dźwięk: '+(mute?'wył.':'wł.'); e.target.classList.toggle('on',!mute); };
-$('#bSpk').onclick=e=>{ speech=!speech; e.target.textContent='Mowa: '+(speech?'wł.':'wył.'); e.target.classList.toggle('on',speech); if(speech) speak('Synteza mowy włączona'); else if('speechSynthesis' in window) speechSynthesis.cancel(); };
+$('#bSpk').onclick=()=>ttsEnable(!TTS.on);
+$('#ttsBtn').onclick=()=>ttsEnable(!TTS.on);
+$('#ttsStop').onclick=()=>{ click(); ttsStop(); };
+$('#ttsSys').onchange=e=>{ TTS.sys=e.target.checked; ttsSave(); };
+$('#ttsVoice').onchange=e=>{ TTS.sel=e.target.value; ttsSave();
+  if(!TTS.on) ttsEnable(true);
+  ttsStop(); ttsSay('Dyżurny ruchu Lipowa, tu maszynista pociągu 54102. Proszę o próbę łączności.',{prof:'dr'}); };
+ttsUI();
 $('#bRst').onclick=()=>location.reload();
 $$('nav button').forEach(b=>b.onclick=()=>{ document.body.dataset.tab=b.dataset.t; $$('nav button').forEach(x=>x.classList.toggle('act',x===b)); if(b.dataset.t==='radio') b.classList.remove('alert'); fit(); });
 function fit(){ const w=$('#dmiWrap').clientWidth; if(w) $('#dmi').style.transform=`scale(${w/640})`; }

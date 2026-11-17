@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="coi-serviceworker.js"></script>
 <title>Symulator ETCS + radiotelefon pociągowy (150 MHz / GSM-R)</title>
 <style>
 :root{--bg:#14171c;--panel:#1e232b;--line:#343b47;--txt:#d9dee6;--mut:#8b95a5;--acc:#f2b233;--ok:#4cc38a;--bad:#e5484d;
@@ -165,6 +166,8 @@ body[data-tab=dmi] #pDmi,body[data-tab=radio] #pRadio,body[data-tab=guide] #pGui
 .ttsbar label input{accent-color:var(--acc)}
 #ttsBtn.speaking{border-color:var(--ok);color:var(--ok)}
 #ttsBtn.speaking::after{content:"";display:inline-block;width:7px;height:7px;margin-left:7px;border-radius:50%;background:var(--ok);animation:bl .8s infinite}
+#ttsNote{font-size:12.5px;color:var(--mut);margin:-4px 0 10px}
+#ttsNote.warn{color:var(--bad)}
 
 /* ---------- instruktor ---------- */
 .gcols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
@@ -266,10 +269,15 @@ details p,details li{color:#b9c0cb;font-size:14px}kbd{background:#111;border:1px
   <h2 style="margin-top:14px">Dziennik łączności</h2>
   <div class="ttsbar">
     <button class="btn sm" id="ttsBtn" aria-pressed="false">🔇 Czytaj dziennik</button>
+    <select id="ttsEngine" aria-label="Silnik mowy">
+      <option value="sys">Silnik: systemowy</option>
+      <option value="neural">Silnik: neuronowy</option>
+    </select>
     <select id="ttsVoice" aria-label="Głos syntezatora mowy"></select>
     <label><input type="checkbox" id="ttsSys"> także systemowe</label>
     <button class="btn sm" id="ttsStop" title="Przerwij czytanie" aria-label="Przerwij czytanie">■</button>
   </div>
+  <div id="ttsNote" hidden></div>
   <div id="log"></div>
 </section>
 
@@ -338,7 +346,7 @@ function tone(f,d,vol=.07,type='sine',when=0){ if(mute)return; try{ AC=AC||new (
   const o=AC.createOscillator(),g=AC.createGain(); o.type=type;o.frequency.value=f;g.gain.value=vol; o.connect(g);g.connect(AC.destination); o.start(AC.currentTime+when);o.stop(AC.currentTime+when+d);}catch(e){} }
 const click=()=>tone(1400,.03,.03,'square');
 /* ---------- synteza mowy (TTS) dziennika łączności ---------- */
-const TTS={on:false,sys:false,rate:1,sel:'',voices:[],all:[],q:[],busy:false,cur:null,wd:null,retry:0,cool:0};
+const TTS={on:false,sys:false,engine:'sys',rate:1,sel:'',voices:[],all:[],q:[],busy:false,cur:null,wd:null,retry:0,cool:0};
 const TTS_KEY='etcs.tts.v1';
 const TTS_MALE=/marek|krzysztof|jacek|adam|michał|michal|piotr|paweł|pawel|andrzej|zbigniew|\bjan\b|male|męski/i;
 const TTS_FEM=/zofia|zosia|paulina|agnieszka|ewa|julia|kobieta|female/i;
@@ -352,8 +360,9 @@ function ttsScore(v){ let s=0; if(/natural|neural/i.test(v.name))s+=80; if(/onli
   if(/google/i.test(v.name))s+=55; if(/microsoft/i.test(v.name))s+=30; if(TTS_GOOD.test(v.name))s+=25;
   if(v.localService===false)s+=5; return s; }
 function ttsLoad(){ try{ const o=JSON.parse(localStorage.getItem(TTS_KEY)||'{}');
-  if(typeof o.on==='boolean')TTS.on=o.on; if(typeof o.sys==='boolean')TTS.sys=o.sys; if(typeof o.sel==='string')TTS.sel=o.sel; }catch(e){} }
-function ttsSave(){ try{ localStorage.setItem(TTS_KEY,JSON.stringify({on:TTS.on,sys:TTS.sys,sel:TTS.sel})); }catch(e){} }
+  if(typeof o.on==='boolean')TTS.on=o.on; if(typeof o.sys==='boolean')TTS.sys=o.sys; if(typeof o.sel==='string')TTS.sel=o.sel;
+  if(o.engine==='neural'||o.engine==='sys')TTS.engine=o.engine; }catch(e){} }
+function ttsSave(){ try{ localStorage.setItem(TTS_KEY,JSON.stringify({on:TTS.on,sys:TTS.sys,sel:TTS.sel,engine:TTS.engine})); }catch(e){} }
 function ttsRefresh(){ if(!('speechSynthesis' in window))return; const all=speechSynthesis.getVoices()||[]; TTS.all=all;
   const pl=all.filter(v=>/^pl/i.test(v.lang||''));
   TTS.voices=(pl.length?pl:all).slice().sort((a,b)=>ttsScore(b)-ttsScore(a)||a.name.localeCompare(b.name)); ttsUI(); }
@@ -373,8 +382,11 @@ function ttsSay(t,o){ if(!TTS.on)return; const ch=ttsChunks(t); if(!ch.length)re
   const prof=(o&&o.prof)||'system', vol=o&&o.vol;
   for(const c of ch) TTS.q.push({text:c,prof,vol});
   if(TTS.q.length>10)TTS.q.splice(0,TTS.q.length-10); ttsPump(); }
-function ttsPump(){ if(!TTS.on||TTS.busy||!TTS.q.length||!('speechSynthesis' in window))return;
-  const it=TTS.q.shift(), p=TTS_PROF[it.prof]||TTS_PROF.system;
+function ttsPump(){ if(!TTS.on||TTS.busy||!TTS.q.length)return;
+  const it=TTS.q.shift();
+  if(TTS.engine==='neural'){ neuSpeak(it); return; }
+  if(!('speechSynthesis' in window))return;
+  const p=TTS_PROF[it.prof]||TTS_PROF.system;
   if(!TTS.all.length&&TTS.retry<12){ TTS.retry++; TTS.q.unshift(it); setTimeout(ttsPump,250); return; }  // poczekaj na listę głosów
   if(TTS.cool&&performance.now()-TTS.cool<90){ TTS.q.unshift(it); setTimeout(ttsPump,100); return; }        // chwila po cancel()
   TTS.retry=0; TTS.cool=0;
@@ -386,22 +398,82 @@ function ttsPump(){ if(!TTS.on||TTS.busy||!TTS.q.length||!('speechSynthesis' in 
   try{ speechSynthesis.resume(); speechSynthesis.speak(u); }catch(e){ fin(); return; }
   TTS.wd=setTimeout(fin,3000+it.text.length*190); }
 function ttsStop(){ TTS.q=[]; TTS.busy=false; TTS.cur=null; TTS.retry=0; TTS.cool=performance.now(); clearTimeout(TTS.wd);
+  if(NEU.src){ try{ NEU.src.stop(); }catch(e){} NEU.src=null; }
   try{ if('speechSynthesis' in window) speechSynthesis.cancel(); }catch(e){} ttsUI(); }
-function ttsUI(){ const sup='speechSynthesis' in window;
-  const h=$('#bSpk'); if(h){ h.disabled=!sup; h.textContent='Mowa: '+(!sup?'brak':TTS.on?'wł.':'wył.'); h.classList.toggle('on',TTS.on&&sup); }
-  const b=$('#ttsBtn'); if(b){ b.disabled=!sup; b.textContent=TTS.busy?'🔊 Czyta…':TTS.on?'🔊 Czytaj dziennik':'🔇 Czytaj dziennik';
-    b.classList.toggle('on',TTS.on&&sup); b.classList.toggle('speaking',TTS.busy); b.setAttribute('aria-pressed',TTS.on?'true':'false'); }
+function ttsUI(){ const sup='speechSynthesis' in window, loading=NEU.state==='loading';
+  const h=$('#bSpk'); if(h){ h.disabled=!sup&&TTS.engine!=='neural'; h.textContent='Mowa: '+(TTS.on?'wł.':'wył.'); h.classList.toggle('on',TTS.on); }
+  const b=$('#ttsBtn'); if(b){ b.textContent=loading?`⏳ Model ${NEU.progress}%`:TTS.busy?'🔊 Czyta…':TTS.on?'🔊 Czytaj dziennik':'🔇 Czytaj dziennik';
+    b.classList.toggle('on',TTS.on); b.classList.toggle('speaking',TTS.busy&&!loading); b.setAttribute('aria-pressed',TTS.on?'true':'false'); }
+  const e=$('#ttsEngine'); if(e)e.value=TTS.engine;
   const c=$('#ttsSys'); if(c)c.checked=!!TTS.sys;
-  const s=$('#ttsVoice'); if(s){ s.disabled=!sup; const auto=TTS.voices[0]||TTS.all[0];
+  const s=$('#ttsVoice'); if(s){ const neural=TTS.engine==='neural';
+    s.disabled=!sup||neural; s.style.display=neural?'none':''; const auto=TTS.voices[0]||TTS.all[0];
     s.innerHTML=`<option value="">Automatyczny — ${auto?esc(ttsName(auto)):'domyślny'}</option>`+
       TTS.voices.map(v=>`<option value="${esc(v.name)}">${esc(ttsName(v))}${/^pl/i.test(v.lang||'')?'':' · '+esc(v.lang||'')}</option>`).join('');
-    s.value=TTS.voices.some(v=>v.name===TTS.sel)?TTS.sel:''; } }
-function ttsEnable(on){ if(!('speechSynthesis' in window)){ ttsUI(); return; } TTS.on=!!on; ttsSave(); if(!TTS.on)ttsStop(); else { ttsRefresh(); ttsSay('Czytanie dziennika łączności włączone.',{prof:'system'}); } ttsUI(); }
+    s.value=TTS.voices.some(v=>v.name===TTS.sel)?TTS.sel:''; }
+  const n=$('#ttsNote'); if(n){ let t='';
+    if(TTS.engine==='neural') t=NEU.state==='loading'?`Pobieranie modelu neuronowego: ${NEU.progress}%${NEU.file?' · '+NEU.file:''} (tylko raz, potem z cache)`
+      :NEU.state==='ready'?`Model neuronowy gotowy — ${NEU.device==='webgpu'?'WebGPU':'CPU (WASM)'}, 44,1 kHz`
+      :NEU.state==='error'?`Model neuronowy niedostępny (${NEU.err.slice(0,70)}). Używam głosu systemowego.`
+      :'Model neuronowy (~190 MB) pobierze się przy pierwszym komunikacie.';
+    n.textContent=t; n.hidden=!t; n.classList.toggle('warn',NEU.state==='error'); } }
+function ttsEnable(on){ TTS.on=!!on; ttsSave();
+  if(!TTS.on)ttsStop();
+  else { if(TTS.engine==='neural') neuReady().catch(()=>{}); else ttsRefresh();
+    ttsSay('Czytanie dziennika łączności włączone.',{prof:'system'}); }
+  ttsUI(); }
 function ttsLog(from,text,cls){ if(!TTS.on)return;
   if(cls==='sys'){ if(TTS.sys)ttsSay(text,{prof:'system'}); return; }
   if(cls==='me'){ ttsSay(text,{prof:'me'}); return; }
   const f=String(from||''); ttsSay(text,{prof:/Dyspozytor/.test(f)?'dysp':/Dyżurny/.test(f)?'dr':'poc'}); }
 function speak(t){ ttsSay(t,{prof:'system'}); }
+/* ---------- silnik neuronowy: Supertonic 3 (transformers.js, WebGPU/WASM) ---------- */
+const NEU={state:'idle',pipe:null,loading:null,progress:0,files:{},file:'',device:'',err:'',ctx:null,src:null,
+  steps:6,speed:1,
+  voice:{dr:'M2',dysp:'M3',poc:'M1',me:'F2',system:'F1'},
+  url:v=>`https://huggingface.co/open-world-group/Supertonic-3-ONNX/resolve/main/voices/${v}.bin`};
+const TTS_MODEL='open-world-group/Supertonic-3-ONNX';
+const TTS_CDN='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.0';
+function neuProgress(p){ if(!p||!p.file)return;
+  if(p.status==='progress'||p.status==='download') NEU.files[p.file]={l:p.loaded||0,t:p.total||0};
+  else if(p.status==='done'){ const f=NEU.files[p.file]; if(f&&f.t)f.l=f.t; }
+  let l=0,t=0; for(const k in NEU.files){ l+=NEU.files[k].l; t+=NEU.files[k].t; }
+  NEU.progress=t?Math.min(99,Math.round(l/t*100)):0; NEU.file=String(p.file).split('/').pop(); ttsUI(); }
+function neuReady(){ if(NEU.pipe)return Promise.resolve(NEU.pipe); if(NEU.loading)return NEU.loading;
+  NEU.state='loading'; NEU.progress=0; NEU.files={}; ttsUI();
+  NEU.loading=(async()=>{
+    const mod=await import(TTS_CDN);
+    /* WASM (wielowątkowy, wymaga crossOriginIsolated) — pewny na każdym GPU.
+       WebGPU w niektórych przeglądarkach psuje sesję ORT, więc go nie próbujemy. */
+    const pipe=await mod.pipeline('text-to-speech',TTS_MODEL,{device:'wasm',
+      dtype:{text_encoder:'fp32',latent_denoiser:'q8',voice_decoder:'fp32'},progress_callback:neuProgress});
+    NEU.pipe=pipe; NEU.device='wasm'; NEU.state='ready'; NEU.progress=100; ttsUI(); return pipe;
+  })().catch(e=>{ NEU.state='error'; NEU.err=String((e&&e.message)||e); NEU.loading=null; ttsUI(); throw e; });
+  return NEU.loading; }
+function neuPlay(audio,vol){ return new Promise(res=>{
+  const data=audio&&audio.audio?audio.audio:audio, sr=(audio&&audio.sampling_rate)||44100;
+  const ctx=NEU.ctx||(NEU.ctx=new (window.AudioContext||window.webkitAudioContext)());
+  if(ctx.state==='suspended')ctx.resume();
+  const buf=ctx.createBuffer(1,data.length,sr); buf.copyToChannel(data instanceof Float32Array?data:new Float32Array(data),0);
+  const src=ctx.createBufferSource(); src.buffer=buf;
+  const g=ctx.createGain(); g.gain.value=Math.max(0,Math.min(1,vol==null?1:vol));
+  src.connect(g); g.connect(ctx.destination); NEU.src=src;
+  src.onended=()=>{ if(NEU.src===src)NEU.src=null; res(); };
+  try{ src.start(); }catch(e){ NEU.src=null; res(); } }); }
+async function neuSpeak(it){
+  const p=TTS_PROF[it.prof]||TTS_PROF.system;
+  TTS.busy=true; TTS.cur=it; ttsUI();
+  try{
+    const pipe=await neuReady();
+    if(TTS.cur!==it)return;                                   // przerwano podczas ładowania modelu
+    const audio=await pipe('<pl>'+it.text+'</pl>',{speaker_embeddings:NEU.url(NEU.voice[it.prof]||NEU.voice.system),
+      num_inference_steps:NEU.steps,speed:Math.max(.7,Math.min(1.3,NEU.speed*(p.rate||1)))});
+    if(TTS.cur!==it)return;
+    await neuPlay(audio,it.vol!=null?it.vol:p.vol);
+  }catch(e){
+    NEU.state='error'; NEU.err=String((e&&e.message)||e); TTS.engine='sys'; ttsSave();
+    TTS.q.unshift(it);                                        // ten wpis przeczyta silnik systemowy
+  }finally{ if(TTS.cur===it){ TTS.busy=false; TTS.cur=null; ttsUI(); ttsPump(); } } }
 if('speechSynthesis' in window){ ttsLoad(); ttsRefresh();
   try{ speechSynthesis.addEventListener('voiceschanged',ttsRefresh); }catch(e){ speechSynthesis.onvoiceschanged=ttsRefresh; } }
 
@@ -911,6 +983,9 @@ $('#bSnd').onclick=e=>{ mute=!mute; e.target.textContent='Dźwięk: '+(mute?'wy�
 $('#bSpk').onclick=()=>ttsEnable(!TTS.on);
 $('#ttsBtn').onclick=()=>ttsEnable(!TTS.on);
 $('#ttsStop').onclick=()=>{ click(); ttsStop(); };
+$('#ttsEngine').onchange=e=>{ TTS.engine=e.target.value; ttsSave(); ttsStop(); ttsUI();
+  if(TTS.engine==='neural'){ if(!TTS.on) ttsEnable(true); else neuReady().catch(()=>{}); }
+  else if(TTS.on) ttsSay('Silnik systemowy.',{prof:'system'}); };
 $('#ttsSys').onchange=e=>{ TTS.sys=e.target.checked; ttsSave(); };
 $('#ttsVoice').onchange=e=>{ TTS.sel=e.target.value; ttsSave();
   if(!TTS.on) ttsEnable(true);
